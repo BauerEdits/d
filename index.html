@@ -25,7 +25,6 @@ MULTIPLIERS = {
 # ------------------------------
 # Database Models
 # ------------------------------
-
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -50,13 +49,12 @@ class Bet(db.Model):
     payout = db.Column(db.Float, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     resolved_at = db.Column(db.DateTime, nullable=True)
-    
+
     user = db.relationship('User', backref='bets')
 
 # ------------------------------
 # Initial Setup
 # ------------------------------
-
 def init_db():
     db.create_all()
     # Create default admin and member accounts if they do not exist.
@@ -73,9 +71,8 @@ init_db()
 # ------------------------------
 # Helper Functions
 # ------------------------------
-
 def login_required(role=None):
-    """A simple decorator to require login and optionally a specific role."""
+    """Decorator to require login and optionally a specific role."""
     from functools import wraps
     def decorator(f):
         @wraps(f)
@@ -114,7 +111,6 @@ def evaluate_bets():
 # ------------------------------
 # Routes
 # ------------------------------
-
 @app.route('/')
 def home():
     return redirect(url_for('login'))
@@ -125,9 +121,9 @@ def login():
     login_form = '''
     <h2>Login</h2>
     <form method="POST">
-        Username: <input type="text" name="username"/><br/>
-        Password: <input type="password" name="password"/><br/>
-        <input type="submit" value="Login"/>
+      Username: <input type="text" name="username"/><br/>
+      Password: <input type="password" name="password"/><br/>
+      <input type="submit" value="Login"/>
     </form>
     '''
     if request.method == 'POST':
@@ -165,8 +161,8 @@ def admin_dashboard():
     <p><a href="{{ url_for('logout') }}">Logout</a></p>
     <h3>Manage Lines</h3>
     <form method="POST" action="{{ url_for('create_line') }}">
-        New Line Description: <input type="text" name="description"/>
-        <input type="submit" value="Create Line"/>
+      New Line Description: <input type="text" name="description"/>
+      <input type="submit" value="Create Line"/>
     </form>
     <ul>
     {% for line in lines %}
@@ -180,20 +176,20 @@ def admin_dashboard():
     </ul>
     <h3>Resolve Bets</h3>
     <form method="POST" action="{{ url_for('resolve_bets') }}">
-        <input type="submit" value="Resolve Unsettled Bets"/>
+      <input type="submit" value="Resolve Unsettled Bets"/>
     </form>
     <h3>All Bets</h3>
     <ul>
     {% for bet in bets %}
-        <li>
-            Bet ID: {{ bet.id }} by User ID: {{ bet.user_id }}, Amount: {{ bet.bet_amount }},
-            Lines: {{ bet.selected_lines }}, Settled: {{ bet.is_settled }},
-            {% if bet.is_settled %}
-               {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %}
-            {% else %}
-               Pending
-            {% endif %}
-        </li>
+      <li>
+        Bet ID: {{ bet.id }} by User ID: {{ bet.user_id }}, Amount: {{ bet.bet_amount }},
+        Lines: {{ bet.selected_lines }}, Settled: {{ bet.is_settled }},
+        {% if bet.is_settled %}
+          {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %}
+        {% else %}
+          Pending
+        {% endif %}
+      </li>
     {% endfor %}
     </ul>
     '''
@@ -236,13 +232,13 @@ def update_line(line_id):
     <h2>Set Outcome for Line ID: {{ line.id }}</h2>
     <p>{{ line.description }}</p>
     <form method="POST">
-        <label>
-          <input type="radio" name="outcome" value="correct" {% if line.outcome %}checked{% endif %}/> Correct
-        </label><br/>
-        <label>
-          <input type="radio" name="outcome" value="incorrect" {% if line.outcome == false %}checked{% endif %}/> Incorrect
-        </label><br/>
-        <input type="submit" value="Update Outcome"/>
+      <label>
+        <input type="radio" name="outcome" value="correct" {% if line.outcome %}checked{% endif %}/> Correct
+      </label><br/>
+      <label>
+        <input type="radio" name="outcome" value="incorrect" {% if line.outcome == false %}checked{% endif %}/> Incorrect
+      </label><br/>
+      <input type="submit" value="Update Outcome"/>
     </form>
     <p><a href="{{ url_for('admin_dashboard') }}">Back to Dashboard</a></p>
     '''
@@ -269,31 +265,31 @@ def member_dashboard():
     <p>Welcome, {{ session['username'] }}! <a href="{{ url_for('logout') }}">Logout</a></p>
     <h3>Place a New Bet</h3>
     <form method="POST" action="{{ url_for('place_bet') }}">
-        Bet Amount: <input type="number" step="0.01" name="bet_amount" required/><br/>
-        <p>Select 2 to 6 Lines:</p>
-        {% for line in available_lines %}
-            <label>
-                <input type="checkbox" name="line_ids" value="{{ line.id }}"/> {{ line.description }}
-            </label><br/>
-        {% endfor %}
-        <input type="submit" value="Place Bet"/>
+      Bet Amount: <input type="number" step="0.01" name="bet_amount" required/><br/>
+      <p>Select 2 to 6 Lines:</p>
+      {% for line in available_lines %}
+        <label>
+          <input type="checkbox" name="line_ids" value="{{ line.id }}"/> {{ line.description }}
+        </label><br/>
+      {% endfor %}
+      <input type="submit" value="Place Bet"/>
     </form>
     <h3>Live Bets</h3>
     <ul>
     {% for bet in live_bets %}
-        <li>
-            Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }}, Placed on: {{ bet.created_at }}
-        </li>
+      <li>
+        Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }}, Placed on: {{ bet.created_at }}
+      </li>
     {% endfor %}
     </ul>
     <h3>Past Bets</h3>
     <ul>
     {% for bet in past_bets %}
-        <li>
-            Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }},
-            {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %},
-            Resolved on: {{ bet.resolved_at }}
-        </li>
+      <li>
+        Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }},
+        {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %},
+        Resolved on: {{ bet.resolved_at }}
+      </li>
     {% endfor %}
     </ul>
     '''
@@ -329,6 +325,5 @@ def place_bet():
 # ------------------------------
 # Run the Application
 # ------------------------------
-
 if __name__ == '__main__':
     app.run(debug=True)
