@@ -1,373 +1,334 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Fake Sportsbook with Login</title>
-  <style>
-    body { font-family: Arial; margin: 20px; }
-    .bet-line { margin-bottom: 20px; border: 1px solid #ccc; padding: 10px; }
-    .bet-line h3 { margin: 0 0 10px 0; }
-    .parlay, .history, .login { background: #f0f8ff; padding: 10px; margin-top: 20px; border: 1px solid #aaa; }
-    button { margin: 3px; }
-    #payoutPreview { font-weight: bold; margin-top: 10px; }
-    .checkmark { color: green; font-size: 20px; }
-    .xmark { color: red; font-size: 20px; }
-  </style>
-</head>
-<body>
-  <h1>Fake Sportsbook (Multi-user Parlay Edition)</h1>
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime
+import os
 
-  <!-- Login Options -->
-  <div class="login">
-    <button onclick="showLoginForm('member')">Member Login</button>
-    <button onclick="showLoginForm('admin')">Admin Login</button>
-  </div>
+app = Flask(__name__)
+app.secret_key = 'super-secret-key'  # Change this in production!
 
-  <!-- Member Login Form -->
-  <div id="memberLogin" style="display:none">
-    <input type="text" id="usernameInput" placeholder="Enter your username">
-    <button onclick="loginUser('member')">Log In</button>
-  </div>
+# Configure SQLite database
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'app.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-  <!-- Admin Login Form -->
-  <div id="adminLogin" style="display:none">
-    <input type="text" id="adminUsernameInput" placeholder="Enter admin username">
-    <input type="password" id="adminPasswordInput" placeholder="Enter admin password">
-    <button onclick="loginUser('admin')">Log In</button>
-  </div>
+db = SQLAlchemy(app)
 
-  <div id="app" style="display:none">
-    <p><strong>Balance:</strong> $<span id="balanceDisplay">0</span></p>
+# Payout multipliers based on number of legs in a bet:
+MULTIPLIERS = {
+    2: 3,
+    3: 7,
+    4: 10,
+    5: 12,
+    6: 25
+}
 
-    <h2>Create New Bet (Admin Only)</h2>
-    <input type="text" id="lineName" placeholder="e.g. Dylan over 20.5 points">
-    <input type="text" id="optionA" placeholder="Option A">
-    <input type="text" id="optionB" placeholder="Option B">
-    <button onclick="createBetLine()">Create Bet</button>
+# ------------------------------
+# Database Models
+# ------------------------------
 
-    <h2>Active Betting Lines</h2>
-    <div id="lines"></div>
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    password = db.Column(db.String(80), nullable=False)  # Plain text for demo purposes!
+    role = db.Column(db.String(20), nullable=False)  # "admin" or "member"
 
-    <div class="parlay">
-      <h3>Parlay Cart</h3>
-      <ul id="parlayList"></ul>
-      <p id="payoutPreview">Potential Payout: N/A</p>
-      <button onclick="placeParlay()">Place Parlay Bet</button>
-    </div>
+class Line(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    description = db.Column(db.String(200), nullable=False)
+    # outcome: None = not yet settled; True = correct; False = incorrect
+    outcome = db.Column(db.Boolean, nullable=True)
 
-    <div class="history">
-      <h3>Your Parlay History</h3>
-      <div id="parlayHistoryList"></div>
-    </div>
+class Bet(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    bet_amount = db.Column(db.Float, nullable=False)
+    # Store the IDs of the selected lines as a comma‑separated string (e.g. "1,3,5")
+    selected_lines = db.Column(db.String(100), nullable=False)
+    num_legs = db.Column(db.Integer, nullable=False)
+    is_settled = db.Column(db.Boolean, default=False)
+    is_won = db.Column(db.Boolean, nullable=True)
+    payout = db.Column(db.Float, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+    
+    user = db.relationship('User', backref='bets')
 
-    <div class="history">
-      <h3>Past Parlays</h3>
-      <div id="pastParlayHistoryList"></div>
-    </div>
-  </div>
+# ------------------------------
+# Initial Setup
+# ------------------------------
 
-  <!-- Display Current User -->
-  <div id="currentUserDisplay" style="margin-top: 20px;"></div>
+def init_db():
+    db.create_all()
+    # Create default admin and member accounts if they do not exist.
+    if not User.query.filter_by(username='admin').first():
+        admin = User(username='admin', password='admin', role='admin')
+        db.session.add(admin)
+    if not User.query.filter_by(username='member').first():
+        member = User(username='member', password='member', role='member')
+        db.session.add(member)
+    db.session.commit()
 
-  <script>
-    let users = JSON.parse(localStorage.getItem("users")) || {}; // Load users from localStorage
-    let currentUser = null;
-    let isAdmin = false;
+init_db()
 
-    // Load lines and parlays from localStorage (persisted)
-    let lines = JSON.parse(localStorage.getItem("lines")) || [];
-    let pastParlays = JSON.parse(localStorage.getItem("pastParlays")) || [];
-    let parlayCart = [];
+# ------------------------------
+# Helper Functions
+# ------------------------------
 
-    // Load user login state from localStorage
-    window.onload = function() {
-        const savedUser = localStorage.getItem("currentUser");
-        if (savedUser && users[savedUser]) {
-            currentUser = savedUser;
-            isAdmin = false;
-            document.getElementById("currentUserDisplay").innerText = `Logged in as: ${savedUser}`;
-            document.getElementById("app").style.display = 'block';
-            renderLines();
-            updateBalanceDisplay();
-            renderParlayHistory();
-            renderPastParlays();
-            parlayCart = [];
-            renderParlay();
-        }
+def login_required(role=None):
+    """A simple decorator to require login and optionally a specific role."""
+    from functools import wraps
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if 'user_id' not in session:
+                flash("You need to log in first.")
+                return redirect(url_for('login'))
+            if role and session.get('role') != role:
+                flash("Unauthorized access.")
+                return redirect(url_for('login'))
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
-        // Listen for changes to localStorage
-        window.addEventListener('storage', function(event) {
-            if (event.key === 'lines') {
-                renderLines();
-            } else if (event.key === 'pastParlays') {
-                renderPastParlays();
-            } else if (event.key === 'users') {
-                renderParlayHistory();
-                updateBalanceDisplay();
-            }
-        });
-    };
+def evaluate_bets():
+    """Check unsettled bets. If all outcomes for the lines in the bet are set,
+       mark the bet as won (if every selected line is correct) or lost."""
+    unsettled_bets = Bet.query.filter_by(is_settled=False).all()
+    for bet in unsettled_bets:
+        # Convert the comma-separated string into a list of line IDs.
+        line_ids = [int(x) for x in bet.selected_lines.split(',') if x]
+        lines = Line.query.filter(Line.id.in_(line_ids)).all()
+        # Only evaluate the bet if all selected lines have their outcomes set.
+        if all(line.outcome is not None for line in lines) and len(lines) == bet.num_legs:
+            if all(line.outcome for line in lines):
+                bet.is_won = True
+                multiplier = MULTIPLIERS.get(bet.num_legs, 1)
+                bet.payout = bet.bet_amount * multiplier
+            else:
+                bet.is_won = False
+                bet.payout = 0
+            bet.is_settled = True
+            bet.resolved_at = datetime.utcnow()
+            db.session.commit()
 
-    // Show the correct login form based on the type (admin or member)
-    function showLoginForm(type) {
-        if (type === 'member') {
-            document.getElementById("memberLogin").style.display = 'block';
-            document.getElementById("adminLogin").style.display = 'none';
-        } else if (type === 'admin') {
-            document.getElementById("adminLogin").style.display = 'block';
-            document.getElementById("memberLogin").style.display = 'none';
-        }
-    }
+# ------------------------------
+# Routes
+# ------------------------------
 
-    // Login function for members and admins
-    function loginUser(type) {
-        if (type === 'member') {
-            const username = document.getElementById("usernameInput").value.trim();
-            if (!username) return alert("Please enter a username");
-            if (!users[username]) {
-                users[username] = { balance: 1000, parlays: [] };
-            }
-            currentUser = username;
-            isAdmin = false;
-            // Save user login state to localStorage
-            localStorage.setItem("currentUser", username);
-            localStorage.setItem("users", JSON.stringify(users));  // Save updated users
-            document.getElementById("currentUserDisplay").innerText = `Logged in as: ${username}`;
-            document.getElementById("app").style.display = 'block';
-            renderLines();
-            updateBalanceDisplay();
-            renderParlayHistory();
-            parlayCart = [];
-            renderParlay();
-        } else if (type === 'admin') {
-            const adminUsername = document.getElementById("adminUsernameInput").value;
-            const adminPassword = document.getElementById("adminPasswordInput").value;
-            const adminUsernameValid = "admin";
-            const adminPasswordValid = "admin123";
-            if (adminUsername === adminUsernameValid && adminPassword === adminPasswordValid) {
-                isAdmin = true;
-                document.getElementById("currentUserDisplay").innerText = `Logged in as Admin`;
-                document.getElementById("app").style.display = 'block';
-                renderLines();
-                updateBalanceDisplay();
-                renderParlayHistory();
-                renderPastParlays();
-                parlayCart = [];
-                renderParlay();
-            } else {
-                alert("Invalid admin credentials");
-            }
-        }
-    }
+@app.route('/')
+def home():
+    return redirect(url_for('login'))
 
-    function updateBalanceDisplay() {
-        document.getElementById("balanceDisplay").innerText = users[currentUser].balance;
-    }
+# ----- Login/Logout -----
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    login_form = '''
+    <h2>Login</h2>
+    <form method="POST">
+        Username: <input type="text" name="username"/><br/>
+        Password: <input type="password" name="password"/><br/>
+        <input type="submit" value="Login"/>
+    </form>
+    '''
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username, password=password).first()
+        if user:
+            session['user_id'] = user.id
+            session['username'] = user.username
+            session['role'] = user.role
+            flash("Logged in successfully as " + user.role)
+            if user.role == 'admin':
+                return redirect(url_for('admin_dashboard'))
+            else:
+                return redirect(url_for('member_dashboard'))
+        else:
+            flash("Invalid credentials. Try again.")
+            return render_template_string(login_form)
+    return render_template_string(login_form)
 
-    function getParlayMultiplier(legCount) {
-        if (legCount === 2) return 3;
-        if (legCount === 3) return 6;
-        if (legCount === 4) return 10;
-        if (legCount === 5) return 15;
-        if (legCount >= 6) return 25;
-        return 2;
-    }
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash("Logged out successfully.")
+    return redirect(url_for('login'))
 
-    function createBetLine() {
-        if (!isAdmin) {
-            return alert("Only admins can create new bet lines.");
-        }
-        const name = document.getElementById("lineName").value;
-        const optionA = document.getElementById("optionA").value;
-        const optionB = document.getElementById("optionB").value;
+# ----- Admin Routes -----
+@app.route('/admin/dashboard')
+@login_required(role='admin')
+def admin_dashboard():
+    lines = Line.query.all()
+    bets = Bet.query.all()
+    dashboard_html = '''
+    <h2>Admin Dashboard</h2>
+    <p><a href="{{ url_for('logout') }}">Logout</a></p>
+    <h3>Manage Lines</h3>
+    <form method="POST" action="{{ url_for('create_line') }}">
+        New Line Description: <input type="text" name="description"/>
+        <input type="submit" value="Create Line"/>
+    </form>
+    <ul>
+    {% for line in lines %}
+      <li>
+        ID: {{ line.id }} - {{ line.description }} - Outcome: 
+        {% if line.outcome is none %}Pending{% elif line.outcome %}Correct{% else %}Incorrect{% endif %}
+        [<a href="{{ url_for('update_line', line_id=line.id) }}">Set Outcome</a>]
+        [<a href="{{ url_for('delete_line', line_id=line.id) }}" onclick="return confirm('Are you sure?')">Delete</a>]
+      </li>
+    {% endfor %}
+    </ul>
+    <h3>Resolve Bets</h3>
+    <form method="POST" action="{{ url_for('resolve_bets') }}">
+        <input type="submit" value="Resolve Unsettled Bets"/>
+    </form>
+    <h3>All Bets</h3>
+    <ul>
+    {% for bet in bets %}
+        <li>
+            Bet ID: {{ bet.id }} by User ID: {{ bet.user_id }}, Amount: {{ bet.bet_amount }},
+            Lines: {{ bet.selected_lines }}, Settled: {{ bet.is_settled }},
+            {% if bet.is_settled %}
+               {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %}
+            {% else %}
+               Pending
+            {% endif %}
+        </li>
+    {% endfor %}
+    </ul>
+    '''
+    return render_template_string(dashboard_html, lines=lines, bets=bets)
 
-        if (!name || !optionA || !optionB) {
-            return alert("Fill all fields!");
-        }
+@app.route('/admin/create_line', methods=['POST'])
+@login_required(role='admin')
+def create_line():
+    description = request.form.get('description')
+    if description:
+        new_line = Line(description=description)
+        db.session.add(new_line)
+        db.session.commit()
+        flash("Line created successfully.")
+    return redirect(url_for('admin_dashboard'))
 
-        const line = {
-            id: Date.now(),
-            name,
-            optionA,
-            optionB,
-            result: null
-        };
+@app.route('/admin/delete_line/<int:line_id>')
+@login_required(role='admin')
+def delete_line(line_id):
+    line = Line.query.get_or_404(line_id)
+    db.session.delete(line)
+    db.session.commit()
+    flash("Line deleted successfully.")
+    return redirect(url_for('admin_dashboard'))
 
-        lines.push(line);
-        localStorage.setItem("lines", JSON.stringify(lines)); // Save updated lines to localStorage
+@app.route('/admin/update_line/<int:line_id>', methods=['GET', 'POST'])
+@login_required(role='admin')
+def update_line(line_id):
+    line = Line.query.get_or_404(line_id)
+    if request.method == 'POST':
+        outcome = request.form.get('outcome')
+        if outcome == 'correct':
+            line.outcome = True
+        elif outcome == 'incorrect':
+            line.outcome = False
+        db.session.commit()
+        flash("Line outcome updated.")
+        return redirect(url_for('admin_dashboard'))
+    update_form = '''
+    <h2>Set Outcome for Line ID: {{ line.id }}</h2>
+    <p>{{ line.description }}</p>
+    <form method="POST">
+        <label>
+          <input type="radio" name="outcome" value="correct" {% if line.outcome %}checked{% endif %}/> Correct
+        </label><br/>
+        <label>
+          <input type="radio" name="outcome" value="incorrect" {% if line.outcome == false %}checked{% endif %}/> Incorrect
+        </label><br/>
+        <input type="submit" value="Update Outcome"/>
+    </form>
+    <p><a href="{{ url_for('admin_dashboard') }}">Back to Dashboard</a></p>
+    '''
+    return render_template_string(update_form, line=line)
 
-        // Trigger the update in other windows via localStorage event
-        localStorage.setItem('lines', JSON.stringify(lines));
+@app.route('/admin/resolve_bets', methods=['POST'])
+@login_required(role='admin')
+def resolve_bets():
+    evaluate_bets()
+    flash("Bets have been evaluated.")
+    return redirect(url_for('admin_dashboard'))
 
-        renderLines();
-    }
+# ----- Member Routes -----
+@app.route('/member/dashboard')
+@login_required(role='member')
+def member_dashboard():
+    # Only show lines that have not been settled so members can bet on them.
+    available_lines = Line.query.filter_by(outcome=None).all()
+    user_id = session['user_id']
+    live_bets = Bet.query.filter_by(user_id=user_id, is_settled=False).all()
+    past_bets = Bet.query.filter_by(user_id=user_id, is_settled=True).all()
+    member_html = '''
+    <h2>Member Dashboard</h2>
+    <p>Welcome, {{ session['username'] }}! <a href="{{ url_for('logout') }}">Logout</a></p>
+    <h3>Place a New Bet</h3>
+    <form method="POST" action="{{ url_for('place_bet') }}">
+        Bet Amount: <input type="number" step="0.01" name="bet_amount" required/><br/>
+        <p>Select 2 to 6 Lines:</p>
+        {% for line in available_lines %}
+            <label>
+                <input type="checkbox" name="line_ids" value="{{ line.id }}"/> {{ line.description }}
+            </label><br/>
+        {% endfor %}
+        <input type="submit" value="Place Bet"/>
+    </form>
+    <h3>Live Bets</h3>
+    <ul>
+    {% for bet in live_bets %}
+        <li>
+            Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }}, Placed on: {{ bet.created_at }}
+        </li>
+    {% endfor %}
+    </ul>
+    <h3>Past Bets</h3>
+    <ul>
+    {% for bet in past_bets %}
+        <li>
+            Bet ID: {{ bet.id }}, Amount: {{ bet.bet_amount }}, Lines: {{ bet.selected_lines }},
+            {% if bet.is_won %}Won! Payout: {{ bet.payout }}{% else %}Lost{% endif %},
+            Resolved on: {{ bet.resolved_at }}
+        </li>
+    {% endfor %}
+    </ul>
+    '''
+    return render_template_string(member_html, available_lines=available_lines, live_bets=live_bets, past_bets=past_bets, session=session)
 
-    function addToParlay(lineId, side) {
-        const existing = parlayCart.find(p => p.lineId === lineId);
-        if (existing) return alert("Already added this line to parlay!");
-        const line = lines.find(l => l.id === lineId);
-        parlayCart.push({ lineId, side, line });
-        renderParlay();
-    }
+@app.route('/member/place_bet', methods=['POST'])
+@login_required(role='member')
+def place_bet():
+    line_ids = request.form.getlist('line_ids')
+    bet_amount = request.form.get('bet_amount')
+    if not line_ids or len(line_ids) < 2:
+        flash("You must select at least 2 lines.")
+        return redirect(url_for('member_dashboard'))
+    if len(line_ids) > 6:
+        flash("You cannot select more than 6 lines.")
+        return redirect(url_for('member_dashboard'))
+    try:
+        bet_amount = float(bet_amount)
+    except ValueError:
+        flash("Invalid bet amount.")
+        return redirect(url_for('member_dashboard'))
+    new_bet = Bet(
+        user_id=session['user_id'],
+        bet_amount=bet_amount,
+        selected_lines=",".join(line_ids),
+        num_legs=len(line_ids)
+    )
+    db.session.add(new_bet)
+    db.session.commit()
+    flash("Bet placed successfully.")
+    return redirect(url_for('member_dashboard'))
 
-    function removeFromParlay(index) {
-        parlayCart.splice(index, 1);
-        renderParlay();
-    }
+# ------------------------------
+# Run the Application
+# ------------------------------
 
-    function renderParlay() {
-        const list = document.getElementById("parlayList");
-        list.innerHTML = "";
-        parlayCart.forEach((pick, index) => {
-            const sideName = pick.side === 'A' ? pick.line.optionA : pick.line.optionB;
-            const li = document.createElement("li");
-            li.innerHTML = `${pick.line.name}: ${sideName} <button onclick="removeFromParlay(${index})">❌</button>`;
-            list.appendChild(li);
-        });
-        const payoutText = parlayCart.length >= 2
-            ? `${getParlayMultiplier(parlayCart.length)}x`
-            : "N/A (need at least 2 picks)";
-        document.getElementById("payoutPreview").innerText = `Potential Payout: ${payoutText}`;
-    }
-
-    function placeParlay() {
-        if (parlayCart.length < 2) return alert("Add at least 2 picks for a parlay!");
-        const amount = parseInt(prompt("Bet amount?"));
-        if (isNaN(amount) || amount <= 0) return;
-        if (amount > users[currentUser].balance) return alert("Insufficient balance");
-
-        users[currentUser].balance -= amount;
-
-        const parlay = {
-            picks: JSON.parse(JSON.stringify(parlayCart)),
-            amount,
-            resolved: false,
-            result: "Pending"
-        };
-
-        users[currentUser].parlays.push(parlay);
-        localStorage.setItem("users", JSON.stringify(users)); // Save updated parlays
-        // Trigger the update in other windows via localStorage event
-        localStorage.setItem('users', JSON.stringify(users));
-
-        parlayCart = [];
-        renderParlay();
-        updateBalanceDisplay();
-        renderParlayHistory();
-    }
-
-    function declareWinner(lineId, winner) {
-        if (!isAdmin) return alert("Only admins can declare winners.");
-        const line = lines.find(l => l.id === lineId);
-        if (line.result) return alert("Already resolved");
-        line.result = winner;
-
-        // Update user's bets on this line
-        for (const user in users) {
-            users[user].parlays.forEach(parlay => {
-                parlay.picks.forEach(pick => {
-                    if (pick.lineId === lineId) {
-                        pick.result = (pick.side === winner ? '✅' : '❌');
-                    }
-                });
-            });
-        }
-
-        // Check and resolve payouts for members if all legs in a parlay are correct
-        for (const user in users) {
-            users[user].parlays.forEach(parlay => {
-                const allCorrect = parlay.picks.every(pick => pick.result === '✅');
-                if (allCorrect && !parlay.resolved) {
-                    parlay.resolved = true;
-                    const multiplier = getParlayMultiplier(parlay.picks.length);
-                    const payout = parlay.amount * multiplier;
-                    users[user].balance += payout;
-                    parlay.result = `Paid Out: $${payout}`;
-                }
-            });
-        }
-
-        // Save updated data to localStorage
-        localStorage.setItem("users", JSON.stringify(users));
-        localStorage.setItem("lines", JSON.stringify(lines));
-        // Trigger the update in other windows via localStorage event
-        localStorage.setItem('lines', JSON.stringify(lines));
-        renderLines();
-        renderParlayHistory();
-    }
-
-    function deleteBetLine(lineId) {
-        if (!isAdmin) return alert("Only admins can delete bet lines.");
-        const lineIndex = lines.findIndex(l => l.id === lineId);
-        if (lineIndex !== -1) {
-            const deletedLine = lines.splice(lineIndex, 1)[0];
-            // Move parlays associated with deleted line to Past Parlays
-            users.forEach(user => {
-                user.parlays.forEach(parlay => {
-                    if (parlay.picks.some(p => p.lineId === deletedLine.id)) {
-                        pastParlays.push(parlay);
-                    }
-                });
-            });
-            localStorage.setItem("pastParlays", JSON.stringify(pastParlays)); // Save past parlays
-            localStorage.setItem("lines", JSON.stringify(lines)); // Save updated lines
-            // Trigger the update in other windows via localStorage event
-            localStorage.setItem('lines', JSON.stringify(lines));
-
-            renderLines();
-        }
-    }
-
-    function renderLines() {
-        const container = document.getElementById("lines");
-        container.innerHTML = "";
-        lines.forEach(line => {
-            const div = document.createElement("div");
-            div.className = "bet-line";
-            div.innerHTML = `
-                <h3>${line.name}</h3>
-                <button onclick="addToParlay(${line.id}, 'A')">${line.optionA}</button>
-                <button onclick="addToParlay(${line.id}, 'B')">${line.optionB}</button>
-                <button onclick="declareWinner(${line.id}, 'A')">Set A as Winner</button>
-                <button onclick="declareWinner(${line.id}, 'B')">Set B as Winner</button>
-                <button onclick="deleteBetLine(${line.id})">Delete</button>
-            `;
-            container.appendChild(div);
-        });
-    }
-
-    function renderParlayHistory() {
-        const container = document.getElementById("parlayHistoryList");
-        container.innerHTML = "";
-        const userParlays = users[currentUser].parlays || [];
-        userParlays.forEach(parlay => {
-            const div = document.createElement("div");
-            div.innerHTML = `
-                <strong>Parlay (${parlay.picks.length} picks) - Bet: $${parlay.amount}</strong><br>
-                <ul>
-                    ${parlay.picks.map(p => `<li>${p.line.name}: ${p.side === 'A' ? p.line.optionA : p.line.optionB}</li>`).join('')}
-                </ul>
-                <p><strong>Result:</strong> ${parlay.result || "Pending"}</p>
-            `;
-            container.appendChild(div);
-        });
-    }
-
-    function renderPastParlays() {
-        const container = document.getElementById("pastParlayHistoryList");
-        container.innerHTML = "";
-        pastParlays.forEach(parlay => {
-            const div = document.createElement("div");
-            div.innerHTML = `
-                <strong>Past Parlay (${parlay.picks.length} picks) - Bet: $${parlay.amount}</strong><br>
-                <ul>
-                    ${parlay.picks.map(p => `<li>${p.line.name}: ${p.side === 'A' ? p.line.optionA : p.line.optionB}</li>`).join('')}
-                </ul>
-                <p><strong>Result:</strong> ${parlay.result || "Pending"}</p>
-            `;
-            container.appendChild(div);
-        });
-    }
-
-  </script>
-</body>
-</html>
+if __name__ == '__main__':
+    app.run(debug=True)
